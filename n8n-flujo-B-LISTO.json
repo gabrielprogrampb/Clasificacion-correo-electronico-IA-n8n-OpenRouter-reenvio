@@ -1,0 +1,422 @@
+{
+  "name": "Flujo B [LISTO v8] - IA + email + log errores",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "contacto-ia",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "b1",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const items = $input.all();\nconst out = [];\nfor (const item of items) {\n  const b = item.json.body ?? item.json;\n  const errores = [];\n  const event_id = String(b.event_id ?? '').trim();\n  const nombre = String(b.nombre ?? '').trim();\n  const email = String(b.email ?? '').trim().toLowerCase();\n  let mensaje = String(b.mensaje ?? '').trim();\n\n  if (!event_id) errores.push('event_id es obligatorio');\n  if (nombre.length < 2 || nombre.length > 80) errores.push('nombre: 2 a 80 caracteres');\n  if (!/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(email)) errores.push('email no valido');\n\n  let truncado = false;\n  if (mensaje.length < 10) errores.push('mensaje: minimo 10 caracteres');\n  if (mensaje.length > 2000) { mensaje = mensaje.slice(0, 2000); truncado = true; }\n\n  out.push({ json: {\n    event_id, nombre, email, mensaje, truncado,\n    origen: String(b.origen ?? 'web'),\n    valido: errores.length === 0,\n    errores,\n    recibido_en: new Date().toISOString()\n  }});\n}\nreturn out;\n"
+      },
+      "id": "b2",
+      "name": "Validar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.valido }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b3",
+      "name": "Valido?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://TU_PROYECTO.supabase.co/rest/v1/contactos",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "TU_SUPABASE_API_KEY"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer TU_SUPABASE_API_KEY"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=representation"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ event_id: $json.event_id, nombre: $json.nombre, email: $json.email, mensaje: $json.mensaje, origen: $json.origen, truncado: $json.truncado }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "b4",
+      "name": "Guardar contacto",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        -160
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer TU_OPENROUTER_API_KEY"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ models: ['cohere/north-mini-code:free', 'nvidia/nemotron-3-super-120b-a12b:free', 'dots-studio/dots-3-note-preview:free'], route: 'fallback', temperature: 0.2, max_tokens: 400, messages: [ { role: 'system', content: 'Clasificas mensajes de contacto. Respondes SOLO JSON valido, sin explicaciones ni markdown, con las claves clasificacion (urgente|normal|informativo) y respuesta (texto breve en espanol, 2 a 3 frases). Un mensaje es URGENTE si describe una caida, falla critica o perdida de dinero en curso. Es INFORMATIVO si solo aporta datos o documentos sin pedir accion. En cualquier otro caso es NORMAL.' }, { role: 'user', content: 'Nombre: ' + $json.nombre + '\\nEmail: ' + $json.email + '\\nMensaje: ' + $json.mensaje } ] }) }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "b5",
+      "name": "Clasificar con IA",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        -160
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const item = $input.first();\nlet raw = String(item.json.choices?.[0]?.message?.content ?? '');\nraw = raw.trim().replace(/^```json/i, '').replace(/^```/, '').replace(/```$/, '').trim();\nconst permitidas = ['urgente', 'normal', 'informativo'];\nlet data = null;\ntry { data = JSON.parse(raw); } catch (e) { data = null; }\nlet clasificacion = 'normal', respuesta = '', ia_ok = false;\nif (data && permitidas.includes(String(data.clasificacion ?? '').toLowerCase())) {\n  clasificacion = String(data.clasificacion).toLowerCase();\n  respuesta = String(data.respuesta ?? '');\n  ia_ok = true;\n}\nconst uso = item.json.usage ?? {};\nconst base = $node[\"Validar\"].json;\nreturn [{ json: { ...base, clasificacion, respuesta, ia_ok, ia_degradada: !ia_ok,\n  modelo_usado: item.json.model ?? null,\n  tokens_entrada: uso.prompt_tokens ?? null, tokens_salida: uso.completion_tokens ?? null } }];"
+      },
+      "id": "b6",
+      "name": "Validar salida IA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.resend.com/emails",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer TU_RESEND_API_KEY"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ from: 'onboarding@resend.dev', to: 'tu_correo@ejemplo.com', subject: 'Hemos recibido tu mensaje [' + $json.clasificacion + ']', html: '<p>Hola ' + $json.nombre + ', gracias por escribirnos.</p><p><strong>Clasificacion:</strong> ' + $json.clasificacion + '</p><p>' + $json.respuesta + '</p>' }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "b7",
+      "name": "Enviar email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        -160
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://TU_PROYECTO.supabase.co/rest/v1/logs_ejecucion",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "TU_SUPABASE_API_KEY"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer TU_SUPABASE_API_KEY"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ event_id: $node[\"Validar salida IA\"].json.event_id, resultado: $node[\"Validar salida IA\"].json.ia_degradada ? \"ok_sin_ia\" : \"ok\", severidad: $node[\"Validar salida IA\"].json.ia_degradada ? \"warn\" : \"info\", paso_fallido: null, tokens_entrada: $node[\"Validar salida IA\"].json.tokens_entrada, tokens_salida: $node[\"Validar salida IA\"].json.tokens_salida }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "b8",
+      "name": "Log ejecucion",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, event_id: $node[\"Validar salida IA\"].json.event_id, clasificacion: $node[\"Validar salida IA\"].json.clasificacion, respuesta_ia: $node[\"Validar salida IA\"].json.respuesta, sin_ia: $node[\"Validar salida IA\"].json.ia_degradada, modelo_usado: $node[\"Validar salida IA\"].json.modelo_usado, tokens_entrada: $node[\"Validar salida IA\"].json.tokens_entrada, tokens_salida: $node[\"Validar salida IA\"].json.tokens_salida }) }}",
+        "options": {}
+      },
+      "id": "b9",
+      "name": "Responder 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1760,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: false, errores: $node[\"Validar\"].json.errores, event_id: $node[\"Validar\"].json.event_id, recibido_en: $node[\"Validar\"].json.recibido_en }) }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "b10",
+      "name": "Responder 400",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://TU_PROYECTO.supabase.co/rest/v1/logs_ejecucion",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "TU_SUPABASE_API_KEY"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer TU_SUPABASE_API_KEY"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ event_id: $node[\"Validar\"].json.event_id, resultado: \"error_validacion\", severidad: \"error\", paso_fallido: \"Validar\", mensaje_error: ($node[\"Validar\"].json.errores || []).join(\"; \") }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "b11",
+      "name": "Log error validacion",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        140
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar": {
+      "main": [
+        [
+          {
+            "node": "Valido?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valido?": {
+      "main": [
+        [
+          {
+            "node": "Guardar contacto",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log error validacion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Guardar contacto": {
+      "main": [
+        [
+          {
+            "node": "Clasificar con IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clasificar con IA": {
+      "main": [
+        [
+          {
+            "node": "Validar salida IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validar salida IA": {
+      "main": [
+        [
+          {
+            "node": "Enviar email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enviar email": {
+      "main": [
+        [
+          {
+            "node": "Log ejecucion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log ejecucion": {
+      "main": [
+        [
+          {
+            "node": "Responder 200",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Responder 200": {
+      "main": []
+    },
+    "Log error validacion": {
+      "main": [
+        [
+          {
+            "node": "Responder 400",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null
+}
